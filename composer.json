@@ -30,7 +30,7 @@
 	"require": {
 		"php": "^8.1",
 		"bamarni/composer-bin-plugin": "^1.8",
-		"teamtnt/tntsearch": "^4.3"
+		"teamtnt/tntsearch": "^5.0"
 	},
 	"require-dev": {
 		"nextcloud/ocp": "dev-stable29",
