@@ -10,7 +10,7 @@ tntsearch search for Nextcloud
 
 ]]>
 	</description>
-	<version>1.0.0</version>
+	<version>30.0.0</version>
 	<licence>agpl</licence>
 	<author mail="upskaling@42fr.net" homepage="https://github.com/upskaling/fulltextsearch_tntsearch">upskaling</author>
 	<namespace>Fulltextsearch_Tntsearch</namespace>
@@ -19,7 +19,7 @@ tntsearch search for Nextcloud
 	<repository>https://github.com/upskaling/fulltextsearch_tntsearch</repository>
 	<screenshot>https://raw.githubusercontent.com/upskaling/fulltextsearch_tntsearch/main/screenshots/screenshot.png</screenshot>
 	<dependencies>
-		<nextcloud min-version="29" max-version="29" />
+		<nextcloud min-version="29" max-version="30" />
 	</dependencies>
 
 	<settings>

@@ -49,7 +49,6 @@ class TntsearchPlatform implements IFullTextSearchPlatform {
 	}
 
 	public function loadPlatform(): void {
-
 		$datadirectory = $this->config->getSystemValue('datadirectory', \OC::$SERVERROOT . '/data');
 
 		$sourcePath = $datadirectory . '/tntsearch/indexes';
@@ -92,17 +91,28 @@ class TntsearchPlatform implements IFullTextSearchPlatform {
 	}
 
 	public function resetIndex(string $providerId): void {
-		$sql = 'DELETE FROM tntsearch_provider
-				WHERE provider_id = :provider_id';
+		// Suppression des données SQL
+		$sql = 'DELETE FROM tntsearch_provider WHERE provider_id = :provider_id';
 		$stmt = $this->pdo->prepare($sql);
 		$stmt->bindParam(':provider_id', $providerId);
 		$stmt->execute();
 
+		// Important : Recharger la plateforme et recréer l'indexeur pour vider la mémoire
 		$this->loadPlatform();
-		$this->getIndexer();
+		$this->getIndexer(); // Force la reconnexion et le rechargement
+
+		// Si vous avez un fichier .idx spécifique, vous pouvez aussi le supprimer manuellement ici
+		// $indexPath = $sourcePath . '/' . self::INDEX_NAME . '.idx';
+		// if (file_exists($indexPath)) unlink($indexPath);
 	}
 
 	public function deleteIndexes(array $indexes): void {
+		$sql = 'DELETE FROM tntsearch_provider WHERE provider_id = :provider_id';
+		$stmt = $this->pdo->prepare($sql);
+		$stmt->bindParam(':provider_id', $indexes[0]);
+		$stmt->execute();
+
+		// Important : Recharger la plateforme et recréer l'indexeur pour vider la mémoire
 		$this->getIndexer();
 	}
 
@@ -229,49 +239,91 @@ class TntsearchPlatform implements IFullTextSearchPlatform {
 		IDocumentAccess $access,
 	): void {
 		$request = $result->getRequest();
-		$search = $request->getSearch();
-		// $providerId = $request->getProviders();
+		$search = trim($request->getSearch());
+
+		$this->tnt->fuzziness(false);
 		$this->tnt->selectIndex(self::INDEX_NAME);
-		// $this->tnt->fuzziness(true);
+
 		$resultMY = $this->tnt->search($search, $request->getSize() + 1);
 		$result->setRawResult(json_encode($resultMY));
 
 		$time = explode(' ', $resultMY['execution_time']);
 		$result->setTime((int)$time[0]);
-
 		$result->setTotal((int)$resultMY['hits']);
 
+		// --- EXTRACTION DES MOTS NÉGATIFS ET POSITIFS ---
+
+		// 1. Mots Négatifs (-mot)
+		// Nouvelle Regex : Capture le mot après un tiret, que ce soit au début de la chaîne (^) ou après un espace (\s)
+		// ^\s? permet de matcher un tiret au début ou après un espace
+		preg_match_all('/(?:^|\s)-(\w+)/', $search, $negativeMatches);
+		$negativeKeywords = $negativeMatches[1] ?? [];
+
+		// 2. Mots Positifs (+mot)
+		// On garde la logique précédente pour le positif (généralement après un espace)
+		preg_match_all('/(?:^|\s)\+(\w+)/', $search, $positiveMatches);
+		$positiveKeywords = $positiveMatches[1] ?? [];
+
 		foreach ($resultMY['ids'] as $value) {
-			$stmt = $this->pdo->prepare('SELECT
-						id,
-						path,
-						title,
-						content,
-						provider_id,
-						source,
-						hash,
-						access_ownerId,
-						access_users,
-						access_groups
-					FROM
-						tntsearch_provider
-					WHERE
-						id = :id');
+			$stmt = $this->pdo->prepare('
+				SELECT id, path, title, content, provider_id, source, hash,
+					access_ownerId, access_users, access_groups
+				FROM tntsearch_provider
+				WHERE id = :id
+			');
 			$stmt->bindParam(':id', $value);
 			$stmt->execute();
-			$resultDB = $stmt->fetchAll()[0];
+			$row = $stmt->fetch();
 
-			if ($this->isDocumentAccessible($resultDB, $access)) {
-				$name = $resultDB['path'];
-				$docScores = $resultMY['docScores'][$value];
-				$document = $this->getDocument('files', $name);
-				$document->setScore((string)$docScores);
-
-				$document->setExcerpts($this->parseSearchEntryExcerpts($document, $search));
-
-				$result->addDocument($document);
+			if (!$row) {
+				continue;
 			}
 
+			$content = $row['content'];
+
+			// --- FILTRAGE PHRASE EXACTE ---
+			$rawQuery = $request->getSearch();
+			$isPhraseSearch = strpos($rawQuery, '"') !== false;
+
+			if ($isPhraseSearch) {
+				$phraseToFind = trim($rawQuery, '"');
+				if (mb_stripos($content, $phraseToFind) === false) {
+					continue;
+				}
+			}
+
+			// --- FILTRAGE MOTS NÉGATIFS (-) ---
+			if (!empty($negativeKeywords)) {
+				foreach ($negativeKeywords as $keyword) {
+					if (mb_stripos($content, $keyword) !== false) {
+						continue 2;
+					}
+				}
+			}
+
+			// --- FILTRAGE MOTS POSITIFS (+) ---
+			if (!empty($positiveKeywords)) {
+				foreach ($positiveKeywords as $keyword) {
+					if (mb_stripos($content, $keyword) === false) {
+						continue 2;
+					}
+				}
+			}
+
+			// --- VÉRIFICATION DROITS D'ACCÈS ---
+			if (!$this->isDocumentAccessible($row, $access)) {
+				continue;
+			}
+
+			// --- CRÉATION DU DOCUMENT RÉSULTAT ---
+			$name = $row['path'];
+			$docScores = $resultMY['docScores'][$value];
+
+			$document = $this->getDocument('files', $name);
+			$document->setScore((string)$docScores);
+			$document->setExcerpts($this->parseSearchEntryExcerpts($document, $rawQuery));
+
+			$result->addDocument($document);
 		}
 	}
 
@@ -339,15 +391,18 @@ class TntsearchPlatform implements IFullTextSearchPlatform {
 		$stmt = $this->pdo->prepare('SELECT id, path, title, content, provider_id, source, hash, access_ownerId, access_users, access_groups FROM tntsearch_provider WHERE path = :path');
 		$stmt->bindParam(':path', $documentId);
 		$stmt->execute();
-		$result = $stmt->fetchAll()[0] ?? null;
+		$result = $stmt->fetchAll()[0] ?? [];
 
-		$document = $this->newMethod($result, $providerId, $documentId);
+		$document = $this->createDocumentFromResult($result, $providerId, $documentId);
 
 		return $document;
 	}
 
-	private function newMethod(
-		$index,
+	/**
+	 * @param array<string, mixed> $index
+	 */
+	private function createDocumentFromResult(
+		array $index,
 		?string $providerId,
 		?string $documentId,
 	): IndexDocument {
@@ -376,6 +431,7 @@ class TntsearchPlatform implements IFullTextSearchPlatform {
 			$this->indexer = $this->tnt->createIndex(self::INDEX_NAME);
 			$this->indexer->query('SELECT id, path, title, content, access_ownerId FROM tntsearch_provider');
 		}
+
 		return $this->indexer;
 	}
 
